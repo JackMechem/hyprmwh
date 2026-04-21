@@ -17,10 +17,16 @@ fn is_demo() -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+struct HyprWorkspace {
+    id: i64,
+}
+
+#[derive(Debug, Deserialize)]
 struct HyprClient {
     address: String,
     class: String,
     title: String,
+    workspace: HyprWorkspace,
 }
 
 fn hyprctl_clients() -> Vec<HyprClient> {
@@ -47,14 +53,14 @@ fn hyprctl_dispatch(args: &[&str]) {
 
 fn demo_windows() -> Vec<WindowInfo> {
     vec![
-        WindowInfo { title: "Welcome to Hyprland".into(), class: "kitty".into(), address: "0x1".into() },
-        WindowInfo { title: "main.rs - hyprmwh".into(), class: "neovim".into(), address: "0x2".into() },
-        WindowInfo { title: "GitHub - Mozilla Firefox".into(), class: "firefox".into(), address: "0x3".into() },
-        WindowInfo { title: "Spotify Premium".into(), class: "spotify".into(), address: "0x4".into() },
-        WindowInfo { title: "Discord".into(), class: "discord".into(), address: "0x5".into() },
-        WindowInfo { title: "Signal".into(), class: "signal".into(), address: "0x6".into() },
-        WindowInfo { title: "htop".into(), class: "kitty".into(), address: "0x7".into() },
-        WindowInfo { title: "nix develop".into(), class: "foot".into(), address: "0x8".into() },
+        WindowInfo { title: "Welcome to Hyprland".into(), class: "kitty".into(), address: "0x1".into(), workspace_id: 1 },
+        WindowInfo { title: "main.rs - hyprmwh".into(), class: "neovim".into(), address: "0x2".into(), workspace_id: 1 },
+        WindowInfo { title: "GitHub - Mozilla Firefox".into(), class: "firefox".into(), address: "0x3".into(), workspace_id: 2 },
+        WindowInfo { title: "Spotify Premium".into(), class: "spotify".into(), address: "0x4".into(), workspace_id: 3 },
+        WindowInfo { title: "Discord".into(), class: "discord".into(), address: "0x5".into(), workspace_id: 2 },
+        WindowInfo { title: "Signal".into(), class: "signal".into(), address: "0x6".into(), workspace_id: 3 },
+        WindowInfo { title: "htop".into(), class: "kitty".into(), address: "0x7".into(), workspace_id: 1 },
+        WindowInfo { title: "nix develop".into(), class: "foot".into(), address: "0x8".into(), workspace_id: 4 },
     ]
 }
 
@@ -87,6 +93,7 @@ struct WindowInfo {
     title: String,
     class: String,
     address: String,
+    workspace_id: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -137,6 +144,7 @@ impl App {
                 title: c.title,
                 class: c.class,
                 address: c.address,
+                workspace_id: c.workspace.id,
             })
             .collect();
     }
@@ -172,6 +180,17 @@ impl App {
                 ]);
                 hyprctl_dispatch(&["focuswindow", &format!("address:{}", win.address)]);
             }
+        }
+    }
+
+    fn goto_selected_workspace(&self) {
+        if self.demo {
+            return;
+        }
+        if let Some(&idx) = self.filtered.get(self.selected) {
+            let win = &self.windows[idx];
+            hyprctl_dispatch(&["workspace", &win.workspace_id.to_string()]);
+            hyprctl_dispatch(&["focuswindow", &format!("address:{}", win.address)]);
         }
     }
 
@@ -269,6 +288,14 @@ fn update(app: &mut App, message: Message) -> Task<Message> {
                 Mode::Normal => {
                     let max = app.filtered.len().saturating_sub(1);
                     match key {
+                        // Shift+Enter = go to window's workspace
+                        Key::Named(keyboard::key::Named::Enter) if modifiers.shift() => {
+                            if !app.filtered.is_empty() {
+                                app.goto_selected_workspace();
+                            }
+                            app.hide()
+                        }
+                        // Enter = bring window here
                         Key::Named(keyboard::key::Named::Enter) => {
                             if !app.filtered.is_empty() {
                                 app.move_selected_to_current_workspace();
