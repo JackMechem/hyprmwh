@@ -67,6 +67,7 @@ pub struct WindowConfig {
     pub anchor: AnchorPosition,
     pub width: u32,
     pub margin: i32,
+    pub line_numbers: LineNumbers,
 }
 
 impl Default for WindowConfig {
@@ -75,8 +76,18 @@ impl Default for WindowConfig {
             anchor: AnchorPosition::Center,
             width: 600,
             margin: 0,
+            line_numbers: LineNumbers::Relative,
         }
     }
+}
+
+#[derive(Deserialize, Debug, Default, Clone, Copy, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum LineNumbers {
+    #[default]
+    Relative,
+    Absolute,
+    Hidden,
 }
 
 #[derive(Deserialize, Debug, Default, Clone)]

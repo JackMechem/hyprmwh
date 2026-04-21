@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use iced::futures::SinkExt;
 use iced::keyboard::key::Named;
-use iced::widget::{button, column, container, row, scrollable, text};
+use iced::widget::{column, container, row, scrollable, text};
 use iced::window::Id as WindowId;
 use iced::{Alignment, Element, Event, Length, Task as Command, event, keyboard};
 use iced_layershell::reexport::KeyboardInteractivity;
@@ -16,7 +16,9 @@ use crate::data::{
     DesktopApp, WindowInfo, hyprctl_active_workspace_id, hyprctl_dispatch, launch_app, load_apps,
     load_windows,
 };
-use crate::styles::{button_style, button_style_selected, container_style, statusbar_style};
+use crate::styles::{container_style, scrollbar_style};
+
+const SCROLLABLE_ID: &str = "main-list";
 
 // ── run mode ─────────────────────────────────────────────────────────────────
 
@@ -195,6 +197,26 @@ pub fn new() -> (App, Command<Message>) {
 // ── layer shell helpers ──────────────────────────────────────────────────────
 
 const WINDOW_HEIGHT: u32 = 500;
+const HELP_HEIGHT: u32 = 620;
+
+fn resize_all(app: &App, height: u32) -> Command<Message> {
+    let cfg = get();
+    let width = cfg.window.width;
+    let anchor = cfg.window.anchor.to_anchor();
+    let cmds: Vec<Command<Message>> = app
+        .known_ids
+        .borrow()
+        .iter()
+        .map(|&id| {
+            Command::done(Message::AnchorSizeChange {
+                id,
+                anchor,
+                size: (width, height),
+            })
+        })
+        .collect();
+    Command::batch(cmds)
+}
 
 fn all_ids_hide(app: &App) -> Command<Message> {
     let anchor = get().window.anchor.to_anchor();
@@ -296,7 +318,7 @@ pub fn update(app: &mut App, message: Message) -> Command<Message> {
             // Help screen: any key dismisses it
             if app.show_help {
                 app.show_help = false;
-                return Command::none();
+                return resize_all(app, WINDOW_HEIGHT);
             }
 
             handle_key(app, key, modifiers)
@@ -353,7 +375,7 @@ fn handle_key(
                     "q" | "wq" | "q!" => do_close(app),
                     "help" | "?" => {
                         app.show_help = true;
-                        Command::none()
+                        resize_all(app, HELP_HEIGHT)
                     }
                     _ => Command::none(),
                 }
@@ -374,6 +396,18 @@ fn handle_key(
 
         VimMode::Normal => handle_normal(app, key, modifiers),
     }
+}
+
+fn scroll_to_selected(app: &App) -> Command<Message> {
+    let count = app.items_len();
+    if count <= 1 {
+        return Command::none();
+    }
+    let ratio = app.selected as f32 / (count - 1) as f32;
+    iced::widget::operation::snap_to(
+        iced::widget::Id::new(SCROLLABLE_ID),
+        iced::widget::scrollable::RelativeOffset { y: ratio, x: 0.0 },
+    )
 }
 
 fn handle_normal(
@@ -400,7 +434,7 @@ fn handle_normal(
         // ? = help
         keyboard::Key::Character(ref c) if (c == "?" || (c == "/" && modifiers.shift())) => {
             app.show_help = true;
-            Command::none()
+            resize_all(app, HELP_HEIGHT)
         }
 
         // Tab = switch view
@@ -466,23 +500,30 @@ fn handle_normal(
             if app.selected < max {
                 app.selected += 1;
             }
-            Command::none()
+            scroll_to_selected(app)
         }
         // k = up
         keyboard::Key::Character(ref c) if c == "k" && modifiers.is_empty() => {
             if app.selected > 0 {
                 app.selected -= 1;
             }
-            Command::none()
+            scroll_to_selected(app)
         }
         // g = top
         keyboard::Key::Character(ref c) if c == "g" && modifiers.is_empty() => {
             app.selected = 0;
-            Command::none()
+            scroll_to_selected(app)
         }
         // G = bottom
         keyboard::Key::Character(ref c) if (c == "G" || (c == "g" && modifiers.shift())) => {
             app.selected = max;
+            scroll_to_selected(app)
+        }
+        // Space = search
+        keyboard::Key::Named(Named::Space) => {
+            app.query.clear();
+            app.filter();
+            app.vim_mode = VimMode::Search;
             Command::none()
         }
         // / = search
@@ -520,33 +561,117 @@ pub fn view(app: &App, id: WindowId) -> Element<'_, Message> {
     }
 
     let s = &get().style;
+    let fg = parse_color(&s.text_color);
+    let dim = parse_color(&s.statusbar_text);
+    let sel_bg = parse_color(&s.button_selected_background);
+    let sel_border = parse_color(&s.button_selected_border);
+    let mono = iced::Font::MONOSPACE;
+    let sz: f32 = 14.0;
 
     // Help screen replaces the list
     let list_content: Element<Message> = if app.show_help {
+        let l = |t: &str| text(t.to_string()).size(sz).font(mono).color(dim);
+        let h = |t: &str| text(t.to_string()).size(sz).font(mono).color(fg);
         let help = column![
-            text("Keybinds").size(18).color(parse_color(&s.text_color)),
-            text("").size(8),
-            text("j / k          move down / up").size(13).color(parse_color(&s.statusbar_text)),
-            text("g / G          jump to top / bottom").size(13).color(parse_color(&s.statusbar_text)),
-            text("Enter          go to window's workspace / launch app").size(13).color(parse_color(&s.statusbar_text)),
-            text("Shift+Enter    move window here (WIN)").size(13).color(parse_color(&s.statusbar_text)),
-            text("/              search / filter").size(13).color(parse_color(&s.statusbar_text)),
-            text("?              show this help").size(13).color(parse_color(&s.statusbar_text)),
-            text("Tab            switch APP / WIN view").size(13).color(parse_color(&s.statusbar_text)),
-            text("q              close").size(13).color(parse_color(&s.statusbar_text)),
-            text(":q :wq :q!     close (command mode)").size(13).color(parse_color(&s.statusbar_text)),
-            text(":help :?       show this help").size(13).color(parse_color(&s.statusbar_text)),
-            text("Esc            cancel search/command").size(13).color(parse_color(&s.statusbar_text)),
-            text("").size(12),
-            text("Press any key to dismiss").size(12).color(parse_color(&s.placeholder_color)),
+            h("~ navigation ~"),
+            l("  j / k ............. move down / up"),
+            l("  g / G ............. jump to top / bottom"),
+            l("  Tab ............... switch APP / WIN view"),
+            text(String::new()).size(4),
+            h("~ search & commands ~"),
+            l("  / Space ........... search / filter"),
+            l("  : ................. command mode"),
+            l("  Esc ............... cancel search/command"),
+            text(String::new()).size(4),
+            h("~ window view ~"),
+            l("  Enter ............. go to window's workspace"),
+            l("  Shift+Enter ....... move window here"),
+            text(String::new()).size(4),
+            h("~ app view ~"),
+            l("  Enter ............. launch app"),
+            text(String::new()).size(4),
+            h("~ quit ~"),
+            l("  q ................. close"),
+            l("  Esc Esc ........... close"),
+            l("  :q :wq :q! ........ close (command mode)"),
+            text(String::new()).size(4),
+            h("~ help ~"),
+            l("  ? ................. show this help"),
+            l("  :help :? .......... show this help"),
+            text(String::new()).size(8),
+            text("  press any key to dismiss".to_string()).size(sz).font(mono).color(parse_color(&s.placeholder_color)),
         ]
-        .spacing(3)
-        .padding(16);
+        .spacing(2)
+        .padding([8, 16]);
 
-        scrollable(help).height(Length::Fill).into()
+        scrollable(help)
+            .direction(scrollable::Direction::Vertical(
+                scrollable::Scrollbar::new()
+                    .width(4)
+                    .scroller_width(4)
+                    .margin(2),
+            ))
+            .style(scrollbar_style)
+            .height(Length::Fill)
+            .into()
     } else {
-        // Approximate max chars that fit in the window width
-        let max_chars = (get().window.width as usize).saturating_sub(80) / 8;
+        use crate::config::LineNumbers;
+        let line_nums = get().window.line_numbers;
+        let max_chars = (get().window.width as usize).saturating_sub(100) / 8;
+        let total = app.items_len();
+        let num_width = if total > 0 { format!("{}", total).len() } else { 1 };
+
+        let make_line_num = |i: usize, selected: bool| -> String {
+            match line_nums {
+                LineNumbers::Hidden => String::new(),
+                LineNumbers::Absolute => format!("{:>w$} ", i + 1, w = num_width),
+                LineNumbers::Relative => {
+                    if selected {
+                        format!("{:>w$} ", i + 1, w = num_width)
+                    } else {
+                        let rel = (i as isize - app.selected as isize).unsigned_abs();
+                        format!("{:>w$} ", rel, w = num_width)
+                    }
+                }
+            }
+        };
+
+        let make_row = |i: usize, label: String| -> Element<Message> {
+            let selected = i == app.selected;
+            let cursor = if selected { ">" } else { " " };
+            let ln = make_line_num(i, selected);
+            let line_num_color = if selected { fg } else { dim };
+
+            let content = row![
+                text(format!(" {}", ln)).size(sz).font(mono).color(
+                    if selected { parse_color(&s.statusbar_mode_normal) } else { line_num_color }
+                ),
+                text(format!("{} {}", cursor, label)).size(sz).font(mono).color(
+                    if selected { fg } else { dim }
+                ),
+            ];
+
+            if selected {
+                container(content)
+                    .width(Length::Fill)
+                    .padding([3, 0])
+                    .style(move |_theme: &iced::Theme| container::Style {
+                        background: Some(iced::Background::Color(sel_bg)),
+                        border: iced::Border {
+                            color: sel_border,
+                            width: 0.0,
+                            radius: 0.0.into(),
+                        },
+                        ..Default::default()
+                    })
+                    .into()
+            } else {
+                container(content)
+                    .width(Length::Fill)
+                    .padding([3, 0])
+                    .into()
+            }
+        };
 
         let items: Vec<Element<Message>> = match app.view_mode {
             ViewMode::Windows => app
@@ -555,18 +680,8 @@ pub fn view(app: &App, id: WindowId) -> Element<'_, Message> {
                 .enumerate()
                 .map(|(i, &idx)| {
                     let w = &app.windows[idx];
-                    let label = truncate(&format!("{} — {}", w.class, w.title), max_chars);
-                    let style = if i == app.selected {
-                        button_style_selected
-                            as fn(&iced::Theme, button::Status) -> button::Style
-                    } else {
-                        button_style
-                    };
-                    button(text(label))
-                        .style(style)
-                        .width(Length::Fill)
-                        .padding([10, 20])
-                        .into()
+                    let label = truncate(&format!("{} | {}", w.class, w.title), max_chars);
+                    make_row(i, label)
                 })
                 .collect(),
             ViewMode::Apps => app
@@ -576,80 +691,88 @@ pub fn view(app: &App, id: WindowId) -> Element<'_, Message> {
                 .map(|(i, &idx)| {
                     let a = &app.all_apps[idx];
                     let label = truncate(&a.name, max_chars);
-                    let style = if i == app.selected {
-                        button_style_selected
-                            as fn(&iced::Theme, button::Status) -> button::Style
-                    } else {
-                        button_style
-                    };
-                    button(text(label))
-                        .style(style)
-                        .width(Length::Fill)
-                        .padding([10, 20])
-                        .into()
+                    make_row(i, label)
                 })
                 .collect(),
         };
 
         scrollable(
             iced::widget::Column::with_children(items)
-                .spacing(4)
+                .spacing(0)
                 .width(Length::Fill),
         )
+        .id(iced::widget::Id::new(SCROLLABLE_ID))
+        .direction(scrollable::Direction::Vertical(
+            scrollable::Scrollbar::new()
+                .width(4)
+                .scroller_width(4)
+                .margin(2),
+        ))
+        .style(scrollbar_style)
         .height(Length::Fill)
         .into()
     };
 
-    // Status bar
+    // Title bar — like a terminal title
     let mode_label = match app.view_mode {
         ViewMode::Windows => "WIN",
         ViewMode::Apps => "APP",
     };
+    let count = app.items_len();
 
+    let title_line = text(format!(
+        "─── {} ({}) ───",
+        mode_label, count
+    ))
+    .size(sz)
+    .font(mono)
+    .color(dim);
+
+    // Status line — vim-style at bottom
     let status_left = if app.show_help {
-        text("HELP").size(14).color(parse_color(&s.statusbar_mode_normal))
+        text("HELP").size(sz).font(mono).color(parse_color(&s.statusbar_mode_normal))
     } else {
         match app.vim_mode {
             VimMode::Search => text(format!("/{}", app.query))
-                .size(14)
+                .size(sz)
+                .font(mono)
                 .color(parse_color(&s.statusbar_mode_search)),
             VimMode::Command => text(format!(":{}", app.cmd))
-                .size(14)
+                .size(sz)
+                .font(mono)
                 .color(parse_color(&s.statusbar_mode_command)),
-            VimMode::Normal => text(format!("[{}] NORMAL", mode_label))
-                .size(14)
+            VimMode::Normal => text(format!("-- {} --", mode_label))
+                .size(sz)
+                .font(mono)
                 .color(parse_color(&s.statusbar_mode_normal)),
         }
     };
 
-    let count = app.items_len();
     let status_right = if app.show_help {
-        text("? to toggle").size(14).color(parse_color(&s.statusbar_text))
+        text("? to toggle").size(sz).font(mono).color(dim)
     } else {
         text(format!(
             "{}/{}",
             if count == 0 { 0 } else { app.selected + 1 },
             count
         ))
-        .size(14)
-        .color(parse_color(&s.statusbar_text))
+        .size(sz)
+        .font(mono)
+        .color(dim)
     };
 
-    let status_bar = container(
-        row![
-            status_left,
-            iced::widget::Space::new().width(Length::Fill),
-            status_right
-        ]
-        .padding([4, 12])
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fill)
-    .style(statusbar_style);
+    let status_bar = row![
+        text(" ").size(sz),
+        status_left,
+        iced::widget::Space::new().width(Length::Fill),
+        status_right,
+        text(" ").size(sz),
+    ]
+    .align_y(Alignment::Center);
 
-    let content = column![list_content, status_bar]
-        .spacing(4)
-        .padding(12)
+    let content = column![title_line, list_content, status_bar]
+        .spacing(2)
+        .padding([8, 12])
         .width(Length::Fill)
         .height(Length::Fill);
 

@@ -1,7 +1,8 @@
 [window]
-anchor = "center"   # center | top | bottom | left | right
+anchor = "center"        # center | top | bottom | left | right
 width  = 600
-margin = 0          # distance in px from anchored edge (ignored for center)
+margin = 0               # distance in px from anchored edge (ignored for center)
+line_numbers = "relative" # relative | absolute | hidden
 
 [style]
 container_background = "#26262ECC"
