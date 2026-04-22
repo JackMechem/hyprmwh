@@ -76,8 +76,65 @@ impl Config {
                 eprintln!("[config] Failed to parse {path}: {e}");
                 Config::default()
             }),
-            Err(_) => Config::default(),
+            Err(_) => {
+                write_default_config(&path);
+                Config::default()
+            }
         }
+    }
+}
+
+fn write_default_config(path: &str) {
+    let dir = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("[config] Could not create config dir: {e}");
+        return;
+    }
+    let content = r##"[window]
+anchor = "center"   # center | top | bottom | left | right
+width = 600
+margin = 0
+line_numbers = "relative"  # relative | absolute | hidden
+
+[keybinds]
+move_down        = ["j"]
+move_up          = ["k"]
+go_top           = ["gg"]
+go_bottom        = ["G"]
+search           = ["/", "Space"]
+quit             = ["q"]
+switch_view      = ["Tab"]
+move_to_workspace = ["t", "i", "a", "r"]
+close_window     = ["dd"]
+
+[style]
+container_background        = "#26262ECC"
+container_border            = "#FFFFFF1A"
+container_radius            = 18.0
+button_radius               = 50.0
+input_radius                = 20.0
+input_background            = "#333340FF"
+input_border_focused        = "#6699FFFF"
+input_border_hover          = "#FFFFFF4D"
+input_border_idle           = "#FFFFFF1A"
+button_background           = "#333340FF"
+button_hover                = "#40404CFF"
+button_pressed              = "#4D4D61FF"
+button_selected_background  = "#405999FF"
+button_selected_hover       = "#5973B3FF"
+button_selected_border      = "#6699FF99"
+text_color                  = "#FFFFFFFF"
+placeholder_color           = "#FFFFFF66"
+statusbar_background        = "#1A1A22FF"
+statusbar_text              = "#FFFFFF99"
+statusbar_mode_normal       = "#80CC80FF"
+statusbar_mode_search       = "#FFFFFFFF"
+statusbar_mode_command      = "#FFFFFFFF"
+"##;
+    if let Err(e) = std::fs::write(path, content) {
+        eprintln!("[config] Could not write default config to {path}: {e}");
+    } else {
+        eprintln!("[config] Wrote default config to {path}");
     }
 }
 
