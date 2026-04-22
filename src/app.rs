@@ -81,6 +81,9 @@ pub struct App {
     // vim count prefix (e.g. "4j" moves down 4)
     pub count_buf: String,
 
+    // pending key sequence for multi-key bindings (e.g. "g" waiting for "gg")
+    pub key_seq: Vec<String>,
+
     // workspace number being typed for move-window mode
     pub move_buf: String,
 
@@ -130,6 +133,7 @@ impl App {
         self.query.clear();
         self.cmd.clear();
         self.move_buf.clear();
+        self.key_seq.clear();
         self.selected = 0;
         self.vim_mode = VimMode::Normal;
         self.show_help = false;
@@ -190,6 +194,7 @@ pub fn new() -> (App, Command<Message>) {
         windows: Vec::new(),
         win_filtered: Vec::new(),
         count_buf: String::new(),
+        key_seq: Vec::new(),
         move_buf: String::new(),
     };
 
@@ -462,42 +467,137 @@ fn take_count(app: &mut App) -> usize {
     n
 }
 
-fn handle_normal(
-    app: &mut App,
-    key: keyboard::Key,
-    modifiers: keyboard::Modifiers,
-) -> Command<Message> {
-    let max = app.items_len().saturating_sub(1);
+// ── keybind sequence engine ──────────────────────────────────────────────────
 
-    // Accumulate digit keys into count buffer (1-9 start, 0 appends)
-    if let keyboard::Key::Character(ref c) = key {
-        if modifiers.is_empty() && c.len() == 1 {
-            let ch = c.chars().next().unwrap();
-            if ch.is_ascii_digit() && (!app.count_buf.is_empty() || ch != '0') {
-                app.count_buf.push(ch);
-                return Command::none();
+/// Parse a binding string like "gg", "G", "Space", "Tab" into key tokens.
+/// Special names (Space, Tab) are consumed as a unit; all other chars are
+/// individual tokens so "gg" → ["g", "g"].
+fn parse_seq(s: &str) -> Vec<String> {
+    const SPECIALS: &[&str] = &["Space", "Tab"];
+    let mut tokens = Vec::new();
+    let mut pos = 0;
+    while pos < s.len() {
+        let rest = &s[pos..];
+        let mut matched = false;
+        for &sp in SPECIALS {
+            if rest.starts_with(sp) {
+                tokens.push(sp.to_string());
+                pos += sp.len();
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            let ch = rest.chars().next().unwrap();
+            tokens.push(ch.to_string());
+            pos += ch.len_utf8();
+        }
+    }
+    tokens
+}
+
+/// Normalise an iced key to a token string for sequence matching.
+/// Returns None for keys we don't route through the seq engine (modifiers, etc.).
+fn key_token(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Option<String> {
+    if modifiers.control() || modifiers.alt() {
+        return None;
+    }
+    match key {
+        keyboard::Key::Named(Named::Space) => Some("Space".into()),
+        keyboard::Key::Named(Named::Tab) => Some("Tab".into()),
+        keyboard::Key::Character(c) => Some(c.to_string()),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Action {
+    MoveDown,
+    MoveUp,
+    GoTop,
+    GoBottom,
+    Search,
+    Quit,
+    SwitchView,
+    MoveToWorkspace,
+    CloseWindow,
+}
+
+fn all_bindings(kb: &crate::config::KeybindsConfig) -> Vec<(&Vec<String>, Action)> {
+    vec![
+        (&kb.move_down,         Action::MoveDown),
+        (&kb.move_up,           Action::MoveUp),
+        (&kb.go_top,            Action::GoTop),
+        (&kb.go_bottom,         Action::GoBottom),
+        (&kb.search,            Action::Search),
+        (&kb.quit,              Action::Quit),
+        (&kb.switch_view,       Action::SwitchView),
+        (&kb.move_to_workspace, Action::MoveToWorkspace),
+        (&kb.close_window,      Action::CloseWindow),
+    ]
+}
+
+/// Check if `seq` exactly matches any configured binding. Returns the action if so.
+fn match_exact(seq: &[String], kb: &crate::config::KeybindsConfig) -> Option<Action> {
+    for (bindings, action) in all_bindings(kb) {
+        for s in bindings {
+            if parse_seq(s) == seq {
+                return Some(action);
             }
         }
     }
+    None
+}
 
-    // j/k consume the count via take_count; all other keys clear it
-    let is_jk = matches!(&key, keyboard::Key::Character(c) if (c == "j" || c == "k") && modifiers.is_empty());
-    if !is_jk {
-        app.count_buf.clear();
-    }
-
-    match key {
-        // Escape = close/hide
-        keyboard::Key::Named(Named::Escape) => do_close(app),
-
-        // ? = help
-        keyboard::Key::Character(ref c) if (c == "?" || (c == "/" && modifiers.shift())) => {
-            app.show_help = true;
-            resize_all(app, HELP_HEIGHT)
+/// Returns true if `seq` is a strict prefix of at least one configured binding.
+fn is_prefix(seq: &[String], kb: &crate::config::KeybindsConfig) -> bool {
+    for (bindings, _) in all_bindings(kb) {
+        for s in bindings {
+            let tokens = parse_seq(s);
+            if tokens.len() > seq.len() && tokens.starts_with(seq) {
+                return true;
+            }
         }
+    }
+    false
+}
 
-        // Tab = switch view
-        keyboard::Key::Named(Named::Tab) => {
+fn execute_action(app: &mut App, action: Action) -> Command<Message> {
+    let max = app.items_len().saturating_sub(1);
+    match action {
+        Action::MoveDown => {
+            let n = take_count(app);
+            app.selected = (app.selected + n).min(max);
+            scroll_to_selected(app)
+        }
+        Action::MoveUp => {
+            let n = take_count(app);
+            app.selected = app.selected.saturating_sub(n);
+            scroll_to_selected(app)
+        }
+        Action::GoTop => {
+            app.count_buf.clear();
+            app.selected = 0;
+            scroll_to_selected(app)
+        }
+        Action::GoBottom => {
+            app.count_buf.clear();
+            app.selected = max;
+            scroll_to_selected(app)
+        }
+        Action::Search => {
+            app.count_buf.clear();
+            app.query.clear();
+            app.filter();
+            app.vim_mode = VimMode::Search;
+            Command::none()
+        }
+        Action::Quit => {
+            app.count_buf.clear();
+            do_close(app)
+        }
+        Action::SwitchView => {
+            app.count_buf.clear();
             match app.view_mode {
                 ViewMode::Windows => {
                     app.view_mode = ViewMode::Apps;
@@ -513,100 +613,147 @@ fn handle_normal(
             app.filter();
             Command::none()
         }
-
-        // Shift+Enter (windows only) = move window to current workspace
-        keyboard::Key::Named(Named::Enter) if modifiers.shift() => {
+        Action::MoveToWorkspace => {
+            app.count_buf.clear();
+            if app.view_mode == ViewMode::Windows {
+                app.move_buf.clear();
+                app.vim_mode = VimMode::MoveWindow;
+            }
+            Command::none()
+        }
+        Action::CloseWindow => {
+            app.count_buf.clear();
             if app.view_mode == ViewMode::Windows {
                 if let Some(&idx) = app.win_filtered.get(app.selected) {
-                    let win = &app.windows[idx];
-                    if let Some(ws_id) = hyprctl_active_workspace_id() {
-                        hyprctl_dispatch(&[
-                            "movetoworkspace",
-                            &format!("{},address:{}", ws_id, win.address),
-                        ]);
-                        hyprctl_dispatch(&[
-                            "focuswindow",
-                            &format!("address:{}", win.address),
-                        ]);
-                    }
+                    let addr = app.windows[idx].address.clone();
+                    hyprctl_dispatch(&["closewindow", &format!("address:{}", addr)]);
+                    app.windows.remove(idx);
+                    app.filter();
                 }
             }
-            do_close(app)
-        }
-
-        // Enter = select
-        keyboard::Key::Named(Named::Enter) => {
-            match app.view_mode {
-                ViewMode::Windows => {
-                    if let Some(&idx) = app.win_filtered.get(app.selected) {
-                        let win = &app.windows[idx];
-                        hyprctl_dispatch(&["workspace", &win.workspace_id.to_string()]);
-                        hyprctl_dispatch(&["focuswindow", &format!("address:{}", win.address)]);
-                    }
-                }
-                ViewMode::Apps => {
-                    if let Some(&idx) = app.app_filtered.get(app.selected) {
-                        launch_app(&app.all_apps[idx].exec.clone());
-                    }
-                }
-            }
-            do_close(app)
-        }
-
-        // q = quit
-        keyboard::Key::Character(ref c) if c == "q" && modifiers.is_empty() => do_close(app),
-
-        // j = down (with count prefix)
-        keyboard::Key::Character(ref c) if c == "j" && modifiers.is_empty() => {
-            let n = take_count(app);
-            app.selected = (app.selected + n).min(max);
-            scroll_to_selected(app)
-        }
-        // k = up (with count prefix)
-        keyboard::Key::Character(ref c) if c == "k" && modifiers.is_empty() => {
-            let n = take_count(app);
-            app.selected = app.selected.saturating_sub(n);
-            scroll_to_selected(app)
-        }
-        // g = top
-        keyboard::Key::Character(ref c) if c == "g" && modifiers.is_empty() => {
-            app.selected = 0;
-            scroll_to_selected(app)
-        }
-        // G = bottom
-        keyboard::Key::Character(ref c) if (c == "G" || (c == "g" && modifiers.shift())) => {
-            app.selected = max;
-            scroll_to_selected(app)
-        }
-        // Space = search
-        keyboard::Key::Named(Named::Space) => {
-            app.query.clear();
-            app.filter();
-            app.vim_mode = VimMode::Search;
             Command::none()
         }
-        // / = search
-        keyboard::Key::Character(ref c) if c == "/" && modifiers.is_empty() => {
-            app.query.clear();
-            app.filter();
-            app.vim_mode = VimMode::Search;
-            Command::none()
-        }
-        // t = move window to workspace (windows view only)
-        keyboard::Key::Character(ref c) if c == "t" && modifiers.is_empty() && app.view_mode == ViewMode::Windows => {
-            app.move_buf.clear();
-            app.vim_mode = VimMode::MoveWindow;
-            Command::none()
-        }
+    }
+}
 
-        // : = command
-        keyboard::Key::Character(ref c) if (c == ":" || (c == ";" && modifiers.shift())) => {
+// ── normal mode handler ──────────────────────────────────────────────────────
+
+fn handle_normal(
+    app: &mut App,
+    key: keyboard::Key,
+    modifiers: keyboard::Modifiers,
+) -> Command<Message> {
+    // ── hardcoded keys (not configurable) ────────────────────────────────────
+
+    // Escape: cancel pending sequence, or close
+    if matches!(key, keyboard::Key::Named(Named::Escape)) {
+        if !app.key_seq.is_empty() {
+            app.key_seq.clear();
+            app.count_buf.clear();
+            return Command::none();
+        }
+        return do_close(app);
+    }
+
+    // ? / shift+/ = help
+    if let keyboard::Key::Character(ref c) = key {
+        if c == "?" || (c == "/" && modifiers.shift()) {
+            app.key_seq.clear();
+            app.count_buf.clear();
+            app.show_help = true;
+            return resize_all(app, HELP_HEIGHT);
+        }
+        // : / shift+; = command mode
+        if c == ":" || (c == ";" && modifiers.shift()) {
+            app.key_seq.clear();
+            app.count_buf.clear();
             app.cmd.clear();
             app.vim_mode = VimMode::Command;
-            Command::none()
+            return Command::none();
         }
-        _ => Command::none(),
     }
+
+    // Shift+Enter (windows only) = move window to current workspace
+    if matches!(key, keyboard::Key::Named(Named::Enter)) && modifiers.shift() {
+        app.key_seq.clear();
+        app.count_buf.clear();
+        if app.view_mode == ViewMode::Windows {
+            if let Some(&idx) = app.win_filtered.get(app.selected) {
+                let win = &app.windows[idx];
+                if let Some(ws_id) = hyprctl_active_workspace_id() {
+                    hyprctl_dispatch(&[
+                        "movetoworkspace",
+                        &format!("{},address:{}", ws_id, win.address),
+                    ]);
+                    hyprctl_dispatch(&["focuswindow", &format!("address:{}", win.address)]);
+                }
+            }
+        }
+        return do_close(app);
+    }
+
+    // Enter = select / activate
+    if matches!(key, keyboard::Key::Named(Named::Enter)) {
+        app.key_seq.clear();
+        app.count_buf.clear();
+        match app.view_mode {
+            ViewMode::Windows => {
+                if let Some(&idx) = app.win_filtered.get(app.selected) {
+                    let win = &app.windows[idx];
+                    hyprctl_dispatch(&["workspace", &win.workspace_id.to_string()]);
+                    hyprctl_dispatch(&["focuswindow", &format!("address:{}", win.address)]);
+                }
+            }
+            ViewMode::Apps => {
+                if let Some(&idx) = app.app_filtered.get(app.selected) {
+                    launch_app(&app.all_apps[idx].exec.clone());
+                }
+            }
+        }
+        return do_close(app);
+    }
+
+    // ── configurable key sequences ────────────────────────────────────────────
+
+    // Digits accumulate into count_buf (only when no sequence is in progress,
+    // so "3j" still works but "g3" doesn't start a count)
+    if app.key_seq.is_empty() {
+        if let keyboard::Key::Character(ref c) = key {
+            if modifiers.is_empty() && c.len() == 1 {
+                let ch = c.chars().next().unwrap();
+                if ch.is_ascii_digit() && (!app.count_buf.is_empty() || ch != '0') {
+                    app.count_buf.push(ch);
+                    return Command::none();
+                }
+            }
+        }
+    }
+
+    let Some(token) = key_token(&key, modifiers) else {
+        app.key_seq.clear();
+        app.count_buf.clear();
+        return Command::none();
+    };
+
+    app.key_seq.push(token);
+
+    let cfg = get();
+    let kb = &cfg.keybinds;
+
+    if let Some(action) = match_exact(&app.key_seq, kb) {
+        app.key_seq.clear();
+        return execute_action(app, action);
+    }
+
+    if is_prefix(&app.key_seq, kb) {
+        // Partial match — show pending in status bar and wait for next key
+        return Command::none();
+    }
+
+    // No match — discard
+    app.key_seq.clear();
+    app.count_buf.clear();
+    Command::none()
 }
 
 // ── view ─────────────────────────────────────────────────────────────────────
@@ -641,7 +788,7 @@ pub fn view(app: &App, id: WindowId) -> Element<'_, Message> {
         let help = column![
             h("~ navigation ~"),
             l("  j / k ............. move down / up"),
-            l("  g / G ............. jump to top / bottom"),
+            l("  gg / G ............ jump to top / bottom"),
             l("  Tab ............... switch APP / WIN view"),
             text(String::new()).size(4),
             h("~ search & commands ~"),
@@ -813,7 +960,7 @@ pub fn view(app: &App, id: WindowId) -> Element<'_, Message> {
                 .size(sz)
                 .font(mono)
                 .color(parse_color(&s.statusbar_mode_command)),
-            VimMode::Normal => text(format!("-- {} --", mode_label))
+            VimMode::Normal => text("-- NORMAL --")
                 .size(sz)
                 .font(mono)
                 .color(parse_color(&s.statusbar_mode_normal)),
@@ -822,6 +969,8 @@ pub fn view(app: &App, id: WindowId) -> Element<'_, Message> {
 
     let status_right = if app.show_help {
         text("? to toggle").size(sz).font(mono).color(dim)
+    } else if !app.key_seq.is_empty() {
+        text(app.key_seq.join("")).size(sz).font(mono).color(parse_color(&s.statusbar_mode_normal))
     } else {
         text(format!(
             "{}/{}",

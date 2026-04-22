@@ -35,6 +35,37 @@ pub fn reload() {
 pub struct Config {
     pub window: WindowConfig,
     pub style: StyleConfig,
+    pub keybinds: KeybindsConfig,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(default)]
+pub struct KeybindsConfig {
+    pub move_down: Vec<String>,
+    pub move_up: Vec<String>,
+    pub go_top: Vec<String>,
+    pub go_bottom: Vec<String>,
+    pub search: Vec<String>,
+    pub quit: Vec<String>,
+    pub switch_view: Vec<String>,
+    pub move_to_workspace: Vec<String>,
+    pub close_window: Vec<String>,
+}
+
+impl Default for KeybindsConfig {
+    fn default() -> Self {
+        Self {
+            move_down:         vec!["j".into()],
+            move_up:           vec!["k".into()],
+            go_top:            vec!["gg".into()],
+            go_bottom:         vec!["G".into()],
+            search:            vec!["/".into(), "Space".into()],
+            quit:              vec!["q".into()],
+            switch_view:       vec!["Tab".into()],
+            move_to_workspace: vec!["t".into(), "i".into(), "a".into(), "r".into()],
+            close_window:      vec!["dd".into()],
+        }
+    }
 }
 
 impl Config {
