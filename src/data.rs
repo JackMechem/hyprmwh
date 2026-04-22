@@ -112,7 +112,7 @@ pub struct WindowInfo {
 }
 
 pub fn load_windows() -> Vec<WindowInfo> {
-    Command::new("hyprctl")
+    let mut windows: Vec<WindowInfo> = Command::new("hyprctl")
         .args(["clients", "-j"])
         .output()
         .ok()
@@ -126,7 +126,10 @@ pub fn load_windows() -> Vec<WindowInfo> {
             address: c.address,
             workspace_id: c.workspace.id,
         })
-        .collect()
+        .collect();
+
+    windows.sort_by_key(|w| w.workspace_id);
+    windows
 }
 
 pub fn hyprctl_active_workspace_id() -> Option<i64> {

@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::sync::{OnceLock, mpsc};
-use std::time::Instant;
 
 use iced::futures::SinkExt;
 use iced::keyboard::key::Named;
@@ -54,6 +53,7 @@ pub enum VimMode {
     Normal,
     Search,
     Command,
+    MoveWindow,
 }
 
 // ── state ────────────────────────────────────────────────────────────────────
@@ -78,8 +78,12 @@ pub struct App {
     pub windows: Vec<WindowInfo>,
     pub win_filtered: Vec<usize>,
 
-    // double-escape tracking
-    pub last_esc: Option<Instant>,
+    // vim count prefix (e.g. "4j" moves down 4)
+    pub count_buf: String,
+
+    // workspace number being typed for move-window mode
+    pub move_buf: String,
+
 }
 
 impl App {
@@ -125,9 +129,11 @@ impl App {
     fn reset_state(&mut self) {
         self.query.clear();
         self.cmd.clear();
+        self.move_buf.clear();
         self.selected = 0;
         self.vim_mode = VimMode::Normal;
         self.show_help = false;
+        self.count_buf.clear();
     }
 }
 
@@ -183,7 +189,8 @@ pub fn new() -> (App, Command<Message>) {
 
         windows: Vec::new(),
         win_filtered: Vec::new(),
-        last_esc: None,
+        count_buf: String::new(),
+        move_buf: String::new(),
     };
 
     // Pre-filter both
@@ -293,6 +300,7 @@ pub fn update(app: &mut App, message: Message) -> Command<Message> {
         Message::ShowApps => {
             app.view_mode = ViewMode::Apps;
             app.reset_state();
+            app.vim_mode = VimMode::Search;
             app.filter();
             app.visible = true;
             all_ids_show(app)
@@ -394,6 +402,44 @@ fn handle_key(
             _ => Command::none(),
         },
 
+        VimMode::MoveWindow => match key {
+            keyboard::Key::Named(Named::Escape) => {
+                app.move_buf.clear();
+                app.vim_mode = VimMode::Normal;
+                Command::none()
+            }
+            keyboard::Key::Named(Named::Backspace) => {
+                app.move_buf.pop();
+                if app.move_buf.is_empty() {
+                    app.vim_mode = VimMode::Normal;
+                }
+                Command::none()
+            }
+            keyboard::Key::Named(Named::Enter) => {
+                if let Ok(ws_id) = app.move_buf.trim().parse::<i64>() {
+                    if let Some(&idx) = app.win_filtered.get(app.selected) {
+                        let addr = app.windows[idx].address.clone();
+                        hyprctl_dispatch(&[
+                            "movetoworkspace",
+                            &format!("{},address:{}", ws_id, addr),
+                        ]);
+                        app.windows = load_windows();
+                        app.filter();
+                    }
+                }
+                app.move_buf.clear();
+                app.vim_mode = VimMode::Normal;
+                Command::none()
+            }
+            keyboard::Key::Character(ref c) if !modifiers.control() && !modifiers.alt() => {
+                if c.chars().all(|ch| ch.is_ascii_digit()) {
+                    app.move_buf.push_str(c);
+                }
+                Command::none()
+            }
+            _ => Command::none(),
+        },
+
         VimMode::Normal => handle_normal(app, key, modifiers),
     }
 }
@@ -410,6 +456,12 @@ fn scroll_to_selected(app: &App) -> Command<Message> {
     )
 }
 
+fn take_count(app: &mut App) -> usize {
+    let n = app.count_buf.parse::<usize>().unwrap_or(1);
+    app.count_buf.clear();
+    n
+}
+
 fn handle_normal(
     app: &mut App,
     key: keyboard::Key,
@@ -417,19 +469,26 @@ fn handle_normal(
 ) -> Command<Message> {
     let max = app.items_len().saturating_sub(1);
 
-    match key {
-        // Double Escape = close/hide
-        keyboard::Key::Named(Named::Escape) => {
-            let now = Instant::now();
-            if let Some(prev) = app.last_esc {
-                if now.duration_since(prev).as_millis() < 500 {
-                    app.last_esc = None;
-                    return do_close(app);
-                }
+    // Accumulate digit keys into count buffer (1-9 start, 0 appends)
+    if let keyboard::Key::Character(ref c) = key {
+        if modifiers.is_empty() && c.len() == 1 {
+            let ch = c.chars().next().unwrap();
+            if ch.is_ascii_digit() && (!app.count_buf.is_empty() || ch != '0') {
+                app.count_buf.push(ch);
+                return Command::none();
             }
-            app.last_esc = Some(now);
-            Command::none()
         }
+    }
+
+    // j/k consume the count via take_count; all other keys clear it
+    let is_jk = matches!(&key, keyboard::Key::Character(c) if (c == "j" || c == "k") && modifiers.is_empty());
+    if !is_jk {
+        app.count_buf.clear();
+    }
+
+    match key {
+        // Escape = close/hide
+        keyboard::Key::Named(Named::Escape) => do_close(app),
 
         // ? = help
         keyboard::Key::Character(ref c) if (c == "?" || (c == "/" && modifiers.shift())) => {
@@ -442,13 +501,15 @@ fn handle_normal(
             match app.view_mode {
                 ViewMode::Windows => {
                     app.view_mode = ViewMode::Apps;
+                    app.reset_state();
+                    app.vim_mode = VimMode::Search;
                 }
                 ViewMode::Apps => {
                     app.view_mode = ViewMode::Windows;
                     app.windows = load_windows();
+                    app.reset_state();
                 }
             }
-            app.reset_state();
             app.filter();
             Command::none()
         }
@@ -495,18 +556,16 @@ fn handle_normal(
         // q = quit
         keyboard::Key::Character(ref c) if c == "q" && modifiers.is_empty() => do_close(app),
 
-        // j = down
+        // j = down (with count prefix)
         keyboard::Key::Character(ref c) if c == "j" && modifiers.is_empty() => {
-            if app.selected < max {
-                app.selected += 1;
-            }
+            let n = take_count(app);
+            app.selected = (app.selected + n).min(max);
             scroll_to_selected(app)
         }
-        // k = up
+        // k = up (with count prefix)
         keyboard::Key::Character(ref c) if c == "k" && modifiers.is_empty() => {
-            if app.selected > 0 {
-                app.selected -= 1;
-            }
+            let n = take_count(app);
+            app.selected = app.selected.saturating_sub(n);
             scroll_to_selected(app)
         }
         // g = top
@@ -533,6 +592,13 @@ fn handle_normal(
             app.vim_mode = VimMode::Search;
             Command::none()
         }
+        // t = move window to workspace (windows view only)
+        keyboard::Key::Character(ref c) if c == "t" && modifiers.is_empty() && app.view_mode == ViewMode::Windows => {
+            app.move_buf.clear();
+            app.vim_mode = VimMode::MoveWindow;
+            Command::none()
+        }
+
         // : = command
         keyboard::Key::Character(ref c) if (c == ":" || (c == ";" && modifiers.shift())) => {
             app.cmd.clear();
@@ -586,13 +652,14 @@ pub fn view(app: &App, id: WindowId) -> Element<'_, Message> {
             h("~ window view ~"),
             l("  Enter ............. go to window's workspace"),
             l("  Shift+Enter ....... move window here"),
+            l("  t ................. move window to workspace"),
             text(String::new()).size(4),
             h("~ app view ~"),
             l("  Enter ............. launch app"),
             text(String::new()).size(4),
             h("~ quit ~"),
             l("  q ................. close"),
-            l("  Esc Esc ........... close"),
+            l("  Esc ............... close"),
             l("  :q :wq :q! ........ close (command mode)"),
             text(String::new()).size(4),
             h("~ help ~"),
@@ -680,7 +747,8 @@ pub fn view(app: &App, id: WindowId) -> Element<'_, Message> {
                 .enumerate()
                 .map(|(i, &idx)| {
                     let w = &app.windows[idx];
-                    let label = truncate(&format!("{} | {}", w.class, w.title), max_chars);
+                    let ws = if w.workspace_id < 0 { "sp".to_string() } else { w.workspace_id.to_string() };
+                    let label = truncate(&format!("[{}] {} | {}", ws, w.class, w.title), max_chars);
                     make_row(i, label)
                 })
                 .collect(),
@@ -738,6 +806,10 @@ pub fn view(app: &App, id: WindowId) -> Element<'_, Message> {
                 .font(mono)
                 .color(parse_color(&s.statusbar_mode_search)),
             VimMode::Command => text(format!(":{}", app.cmd))
+                .size(sz)
+                .font(mono)
+                .color(parse_color(&s.statusbar_mode_command)),
+            VimMode::MoveWindow => text(format!("move to ws: {}", app.move_buf))
                 .size(sz)
                 .font(mono)
                 .color(parse_color(&s.statusbar_mode_command)),
