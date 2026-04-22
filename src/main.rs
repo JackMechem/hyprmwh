@@ -84,6 +84,26 @@ Hyprland keybind examples:
     );
 }
 
+const NORMAL_LOCK: &str = "/tmp/hyprmwh-normal.lock";
+
+/// Returns false (and exits) if another normal-mode instance is already running.
+fn acquire_normal_lock() -> bool {
+    if let Ok(content) = std::fs::read_to_string(NORMAL_LOCK) {
+        if let Ok(pid) = content.trim().parse::<u32>() {
+            if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                eprintln!("hyprmwh is already running (pid {pid}).");
+                return false;
+            }
+        }
+    }
+    std::fs::write(NORMAL_LOCK, std::process::id().to_string()).ok();
+    true
+}
+
+pub fn release_normal_lock() {
+    std::fs::remove_file(NORMAL_LOCK).ok();
+}
+
 fn main() -> Result<(), iced_layershell::Error> {
     let args = parse_args();
 
@@ -134,6 +154,10 @@ fn main() -> Result<(), iced_layershell::Error> {
     } else {
         // No flags: one-shot app launcher (default)
         app::RUN_MODE.set(RunMode::Normal).ok();
+    }
+
+    if matches!(app::run_mode(), RunMode::Normal) && !acquire_normal_lock() {
+        std::process::exit(1);
     }
 
     let cfg = config::get();

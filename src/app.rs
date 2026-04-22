@@ -284,7 +284,10 @@ fn do_close(app: &mut App) -> Command<Message> {
     app.visible = false;
     app.reset_state();
     match run_mode() {
-        RunMode::Normal => std::process::exit(0),
+        RunMode::Normal => {
+            std::fs::remove_file("/tmp/hyprmwh-normal.lock").ok();
+            std::process::exit(0);
+        }
         RunMode::Daemon => all_ids_hide(app),
     }
 }
@@ -363,6 +366,23 @@ fn handle_key(
             }
             keyboard::Key::Named(Named::Backspace) => {
                 app.query.pop();
+                app.filter();
+                Command::none()
+            }
+            keyboard::Key::Named(Named::Tab) => {
+                match app.view_mode {
+                    ViewMode::Windows => {
+                        app.view_mode = ViewMode::Apps;
+                        app.reset_state();
+                        app.vim_mode = VimMode::Search;
+                    }
+                    ViewMode::Apps => {
+                        app.view_mode = ViewMode::Windows;
+                        app.windows = load_windows();
+                        app.reset_state();
+                        // Windows starts in normal mode
+                    }
+                }
                 app.filter();
                 Command::none()
             }
